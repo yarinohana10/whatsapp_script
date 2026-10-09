@@ -1,6 +1,7 @@
 import { OnModuleInit } from '@nestjs/common';
 export declare class WhatsappService implements OnModuleInit {
     private client;
+    private resolveChromeExecutablePath;
     onModuleInit(): Promise<void>;
     private readInvitationMedia;
     sendMessageWithPichture(phoneNumber: string, message: string): Promise<void>;

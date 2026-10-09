@@ -22,12 +22,24 @@ import {
 export class WhatsappService implements OnModuleInit {
   private client: Client;
 
+  private resolveChromeExecutablePath(): string | undefined {
+    const candidates = [
+      process.env.CHROME_PATH,
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
+    ].filter(Boolean) as string[];
+
+    return candidates.find((p) => fs.existsSync(p));
+  }
+
   async onModuleInit() {
     try {
+      const executablePath = this.resolveChromeExecutablePath();
       this.client = new Client({
         authStrategy: new LocalAuth(),
         puppeteer: {
           headless: false,
+          ...(executablePath ? { executablePath } : {}),
           args: ['--no-sandbox', '--disable-setuid-sandbox'],
         },
       });

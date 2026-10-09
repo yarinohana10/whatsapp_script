@@ -54,12 +54,22 @@ const dayjs_1 = __importDefault(require("dayjs"));
 const supabase_js_1 = require("@supabase/supabase-js");
 const event_constants_1 = require("./event.constants");
 let WhatsappService = class WhatsappService {
+    resolveChromeExecutablePath() {
+        const candidates = [
+            process.env.CHROME_PATH,
+            '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+            '/Applications/Chromium.app/Contents/MacOS/Chromium',
+        ].filter(Boolean);
+        return candidates.find((p) => fs.existsSync(p));
+    }
     async onModuleInit() {
         try {
+            const executablePath = this.resolveChromeExecutablePath();
             this.client = new whatsapp_web_js_1.Client({
                 authStrategy: new whatsapp_web_js_1.LocalAuth(),
                 puppeteer: {
                     headless: false,
+                    ...(executablePath ? { executablePath } : {}),
                     args: ['--no-sandbox', '--disable-setuid-sandbox'],
                 },
             });
