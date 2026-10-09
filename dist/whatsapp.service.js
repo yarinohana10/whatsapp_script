@@ -54,6 +54,12 @@ const dayjs_1 = __importDefault(require("dayjs"));
 const supabase_js_1 = require("@supabase/supabase-js");
 const event_constants_1 = require("./event.constants");
 let WhatsappService = class WhatsappService {
+    constructor() {
+        this.whatsappSendOptions = {
+            linkPreview: false,
+            sendSeen: false,
+        };
+    }
     resolveChromeExecutablePath() {
         const candidates = [
             process.env.CHROME_PATH,
@@ -97,16 +103,55 @@ let WhatsappService = class WhatsappService {
     }
     readInvitationMedia() {
         const imagePath = path.join(process.cwd(), event_constants_1.INVITATION_IMAGE_PATH);
-        const mediaBuffer = fs.readFileSync(imagePath);
-        return new whatsapp_web_js_2.MessageMedia('image/png', mediaBuffer.toString('base64'), 'henna-invitation.png');
+        return whatsapp_web_js_2.MessageMedia.fromFilePath(imagePath);
+    }
+    normalizeIsraeliPhone(raw) {
+        let digits = raw.toString().replace(/[^0-9]/g, '');
+        if (digits.startsWith('972')) {
+            digits = digits.slice(3);
+        }
+        if (digits.startsWith('0')) {
+            digits = digits.slice(1);
+        }
+        return `972${digits}`;
+    }
+    toChatId(phoneNumber) {
+        return `${this.normalizeIsraeliPhone(phoneNumber)}@c.us`;
+    }
+    async resolveChatId(phoneNumber) {
+        const digits = this.normalizeIsraeliPhone(phoneNumber);
+        const wid = await this.client.getNumberId(digits);
+        if (!wid?._serialized) {
+            throw new Error(`Number ${digits} is not registered on WhatsApp`);
+        }
+        return wid._serialized;
+    }
+    async sendInvitationWithImageCaption(chatId, caption) {
+        const media = this.readInvitationMedia();
+        const fullCaption = caption.trim();
+        const sendWithMedia = (extra = {}) => this.client.sendMessage(chatId, media, {
+            caption: fullCaption,
+            ...this.whatsappSendOptions,
+            ...extra,
+        });
+        try {
+            await sendWithMedia();
+        }
+        catch (firstErr) {
+            console.warn(`⚠️ Image+caption failed (${firstErr.message}), retrying as document…`);
+            await sendWithMedia({ sendMediaAsDocument: true });
+        }
     }
     async sendMessageWithPichture(phoneNumber, message) {
         try {
-            const number = phoneNumber.replace(/[^0-9]/g, '');
-            const chatId = `${number}@c.us`;
+            const number = this.normalizeIsraeliPhone(phoneNumber);
+            const chatId = await this.resolveChatId(phoneNumber);
             const caption = message;
             const media = this.readInvitationMedia();
-            await this.client.sendMessage(chatId, media, { caption });
+            await this.client.sendMessage(chatId, media, {
+                caption,
+                ...this.whatsappSendOptions,
+            });
             console.log(`✅ Message with image sent to ${number}`);
         }
         catch (err) {
@@ -116,10 +161,10 @@ let WhatsappService = class WhatsappService {
     }
     async sendMessageWithOutPichture(phoneNumber, message) {
         try {
-            const number = phoneNumber.replace(/[^0-9]/g, '');
-            const chatId = `${number}@c.us`;
+            const number = this.normalizeIsraeliPhone(phoneNumber);
+            const chatId = await this.resolveChatId(phoneNumber);
             const caption = `${message} מחכים לראותכם! `;
-            await this.client.sendMessage(chatId, caption);
+            await this.client.sendMessage(chatId, caption, this.whatsappSendOptions);
             console.log(`✅ Message with image sent to ${number}`);
         }
         catch (err) {
@@ -129,12 +174,10 @@ let WhatsappService = class WhatsappService {
     }
     async sendMessageToArrivalConfirmation(phoneNumber, message) {
         try {
-            const number = phoneNumber.replace(/[^0-9]/g, '');
-            const chatId = `${number}@c.us`;
-            const caption = `${message} ${event_constants_1.RSVP_LINK}${event_constants_1.LINK_FOLLOWUP_HE}`;
-            const media = this.readInvitationMedia();
-            await this.client.sendMessage(chatId, media, { caption });
-            console.log(`✅ Message with image sent to ${number}`);
+            const number = this.normalizeIsraeliPhone(phoneNumber);
+            const chatId = await this.resolveChatId(phoneNumber);
+            await this.sendInvitationWithImageCaption(chatId, message.trim());
+            console.log(`✅ Invitation (image + caption) sent to ${number}`);
         }
         catch (err) {
             console.error(`❌ Failed to send to ${phoneNumber}:`, err.message);
@@ -161,6 +204,7 @@ let WhatsappService = class WhatsappService {
     }
     async sendMessagesInviteWeddingFromExcel(file) {
         const successes = [];
+        const failures = [];
         const workbook = XLSX.read(file.buffer, { type: 'buffer' });
         const sheet = workbook.Sheets[workbook.SheetNames[0]];
         const data = XLSX.utils.sheet_to_json(sheet);
@@ -169,21 +213,25 @@ let WhatsappService = class WhatsappService {
             .map(item => {
             return {
                 name: item["שם מלא"]?.trim(),
-                phone: `+972${item["מספר טלפון"].toString().replace(/[^0-9]/g, '')}`
+                phone: this.normalizeIsraeliPhone(item["מספר טלפון"].toString()),
             };
         });
         for (const contact of formattedData) {
-            const message3 = `שלום, אנו מזכירים לכם לגבי *החינה של ${event_constants_1.EVENT_NAMES_HE}* שתתקיים ביום שלישי ה-${event_constants_1.EVENT_DATE_HE}
-    ב${event_constants_1.EVENT_VENUE_HE}
-      
-    לניווט לאירוע ניתן לרשום בוייז - "${event_constants_1.WAZE_SEARCH_HE}"
-
-      לפרטים נוספים, הוספה ליומן ועדכון סטטוס ההגעה ניתן ללחוץ על הקישור הבא:`;
-            await this.sendMessageToArrivalConfirmation(contact.phone, message3);
-            successes.push(contact);
+            const invitationCaption = (0, event_constants_1.buildInvitationCaption)(contact.name);
+            try {
+                await this.sendMessageToArrivalConfirmation(contact.phone, invitationCaption);
+                successes.push(contact);
+            }
+            catch (err) {
+                failures.push({
+                    name: contact.name,
+                    phone: contact.phone,
+                    error: err.message,
+                });
+            }
             await this.delay(1000);
         }
-        return successes;
+        return { successes, failures };
     }
     async sendMessagesForTableNumberFromExcel(file) {
         const successes = [];
@@ -195,7 +243,7 @@ let WhatsappService = class WhatsappService {
             .map(item => {
             return {
                 name: item["שם מלא"]?.trim(),
-                phone: `+972${item["מספר טלפון"].toString().replace(/[^0-9]/g, '')}`,
+                phone: this.normalizeIsraeliPhone(item["מספר טלפון"].toString()),
                 tableNumber: item["מספר שולחן"].toString(),
             };
         });
@@ -222,7 +270,7 @@ let WhatsappService = class WhatsappService {
         const formattedData = data.filter(item => item["מספר טלפון"]).map(item => {
             return {
                 name: item["שם מלא"]?.trim(),
-                phone: `+972${item["מספר טלפון"].toString().replace(/[^0-9]/g, '')}`
+                phone: this.normalizeIsraeliPhone(item["מספר טלפון"].toString()),
             };
         });
         console.log('formattedData', formattedData);
@@ -234,10 +282,10 @@ let WhatsappService = class WhatsappService {
     }
     async thenkYouMessage(phoneNumber, message) {
         try {
-            const number = phoneNumber.replace(/[^0-9]/g, '');
-            const chatId = `${number}@c.us`;
-            await this.client.sendMessage(chatId, message);
-            console.log(`✅ Message with image sent to ${phoneNumber}`);
+            const number = this.normalizeIsraeliPhone(phoneNumber);
+            const chatId = await this.resolveChatId(phoneNumber);
+            await this.client.sendMessage(chatId, message, this.whatsappSendOptions);
+            console.log(`✅ Message with image sent to ${number}`);
         }
         catch (err) {
             console.error(`❌ Failed to send to ${phoneNumber}:`, err.message);
@@ -282,7 +330,7 @@ let WhatsappService = class WhatsappService {
         return data
             .map(g => ({
             name: g.name?.trim(),
-            phone: `${g.phone.toString().replace(/[^0-9]/g, '')}`,
+            phone: this.normalizeIsraeliPhone(g.phone.toString()),
             eventDate: g.event_date
         }));
     }
@@ -296,7 +344,10 @@ let WhatsappService = class WhatsappService {
 
     לניווט לאירוע ניתן לרשום בוויז - "${event_constants_1.WAZE_SEARCH_HE}"
 
-    לפרטים נוספים, הוספה ליומן ועדכון סטטוס ההגעה ניתן ללחוץ על הקישור הבא:`;
+    לפרטים נוספים, הוספה ליומן ועדכון סטטוס ההגעה ניתן ללחוץ על הקישור הבא:
+מחכים לראותכם!
+${event_constants_1.RSVP_LINK}
+${event_constants_1.LINK_FOLLOWUP_HE}`;
             await this.sendMessageToArrivalConfirmation(guest.phone, message);
             successes.push(guest.phone);
             await this.delay(1000);

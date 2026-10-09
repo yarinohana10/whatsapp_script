@@ -15,6 +15,7 @@ import {
   LINK_FOLLOWUP_HE,
   RSVP_LINK,
   WAZE_SEARCH_HE,
+  buildInvitationCaption,
 } from './event.constants';
 
 
@@ -73,21 +74,75 @@ export class WhatsappService implements OnModuleInit {
 
   private readInvitationMedia(): MessageMedia {
     const imagePath = path.join(process.cwd(), INVITATION_IMAGE_PATH);
-    const mediaBuffer = fs.readFileSync(imagePath);
-    return new MessageMedia(
-      'image/png',
-      mediaBuffer.toString('base64'),
-      'henna-invitation.png',
-    );
+    return MessageMedia.fromFilePath(imagePath);
+  }
+
+  /** Digits only, country code 972, no leading 0 (e.g. 0532493904 → 972532493904). */
+  private normalizeIsraeliPhone(raw: string): string {
+    let digits = raw.toString().replace(/[^0-9]/g, '');
+    if (digits.startsWith('972')) {
+      digits = digits.slice(3);
+    }
+    if (digits.startsWith('0')) {
+      digits = digits.slice(1);
+    }
+    return `972${digits}`;
+  }
+
+  private toChatId(phoneNumber: string): string {
+    return `${this.normalizeIsraeliPhone(phoneNumber)}@c.us`;
+  }
+
+  private async resolveChatId(phoneNumber: string): Promise<string> {
+    const digits = this.normalizeIsraeliPhone(phoneNumber);
+    const wid = await this.client.getNumberId(digits);
+    if (!wid?._serialized) {
+      throw new Error(`Number ${digits} is not registered on WhatsApp`);
+    }
+    return wid._serialized;
+  }
+
+  /** Avoid getLinkPreview errors on text messages that include URLs. */
+  private readonly whatsappSendOptions = {
+    linkPreview: false,
+    sendSeen: false,
+  };
+
+  /** One WhatsApp message: invitation image + full caption (including RSVP link). */
+  private async sendInvitationWithImageCaption(
+    chatId: string,
+    caption: string,
+  ): Promise<void> {
+    const media = this.readInvitationMedia();
+    const fullCaption = caption.trim();
+
+    const sendWithMedia = (extra: Record<string, unknown> = {}) =>
+      this.client.sendMessage(chatId, media, {
+        caption: fullCaption,
+        ...this.whatsappSendOptions,
+        ...extra,
+      });
+
+    try {
+      await sendWithMedia();
+    } catch (firstErr) {
+      console.warn(
+        `⚠️ Image+caption failed (${firstErr.message}), retrying as document…`,
+      );
+      await sendWithMedia({ sendMediaAsDocument: true });
+    }
   }
 
   async sendMessageWithPichture(phoneNumber: string, message: string) {
     try {
-      const number = phoneNumber.replace(/[^0-9]/g, '');
-      const chatId = `${number}@c.us`;
+      const number = this.normalizeIsraeliPhone(phoneNumber);
+      const chatId = await this.resolveChatId(phoneNumber);
       const caption = message;
       const media = this.readInvitationMedia();
-      await this.client.sendMessage(chatId, media, { caption });
+      await this.client.sendMessage(chatId, media, {
+        caption,
+        ...this.whatsappSendOptions,
+      });
 
       console.log(`✅ Message with image sent to ${number}`);
     } catch (err) {
@@ -98,10 +153,10 @@ export class WhatsappService implements OnModuleInit {
 
   async sendMessageWithOutPichture(phoneNumber: string, message: string) {
     try {
-      const number = phoneNumber.replace(/[^0-9]/g, '');
-      const chatId = `${number}@c.us`;
+      const number = this.normalizeIsraeliPhone(phoneNumber);
+      const chatId = await this.resolveChatId(phoneNumber);
       const caption = `${message} מחכים לראותכם! `;
-      await this.client.sendMessage(chatId, caption);
+      await this.client.sendMessage(chatId, caption, this.whatsappSendOptions);
       console.log(`✅ Message with image sent to ${number}`);
     } catch (err) {
       console.error(`❌ Failed to send to ${phoneNumber}:`, err.message);
@@ -111,12 +166,10 @@ export class WhatsappService implements OnModuleInit {
 
   async sendMessageToArrivalConfirmation(phoneNumber: string, message: string) {
     try {
-      const number = phoneNumber.replace(/[^0-9]/g, '');
-      const chatId = `${number}@c.us`;
-      const caption = `${message} ${RSVP_LINK}${LINK_FOLLOWUP_HE}`;
-      const media = this.readInvitationMedia();
-      await this.client.sendMessage(chatId, media, { caption });
-      console.log(`✅ Message with image sent to ${number}`);
+      const number = this.normalizeIsraeliPhone(phoneNumber);
+      const chatId = await this.resolveChatId(phoneNumber);
+      await this.sendInvitationWithImageCaption(chatId, message.trim());
+      console.log(`✅ Invitation (image + caption) sent to ${number}`);
     } catch (err) {
       console.error(`❌ Failed to send to ${phoneNumber}:`, err.message);
       throw err;
@@ -147,7 +200,8 @@ export class WhatsappService implements OnModuleInit {
 
   //read from excel
   async sendMessagesInviteWeddingFromExcel(file: Express.Multer.File) {
-    const successes: string[] = [];
+    const successes: { name: string; phone: string }[] = [];
+    const failures: { name: string; phone: string; error: string }[] = [];
     const workbook = XLSX.read(file.buffer, { type: 'buffer' });
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const data: any = XLSX.utils.sheet_to_json(sheet);
@@ -156,7 +210,7 @@ export class WhatsappService implements OnModuleInit {
       .map(item => {
         return {
           name: item["שם מלא"]?.trim(),
-          phone: `+972${item["מספר טלפון"].toString().replace(/[^0-9]/g, '')}` // הסרת תווים מיותרים
+          phone: this.normalizeIsraeliPhone(item["מספר טלפון"].toString()),
         };
       });
     // console.log('formattedData', formattedData)
@@ -179,18 +233,21 @@ export class WhatsappService implements OnModuleInit {
       // לחצו כאן כדי לעדכן אותנו:
       //       `;
 
-      const message3 = `שלום, אנו מזכירים לכם לגבי *החינה של ${EVENT_NAMES_HE}* שתתקיים ביום שלישי ה-${EVENT_DATE_HE}
-    ב${EVENT_VENUE_HE}
-      
-    לניווט לאירוע ניתן לרשום בוייז - "${WAZE_SEARCH_HE}"
+      const invitationCaption = buildInvitationCaption(contact.name);
 
-      לפרטים נוספים, הוספה ליומן ועדכון סטטוס ההגעה ניתן ללחוץ על הקישור הבא:`
-
-      await this.sendMessageToArrivalConfirmation(contact.phone, message3);
-      successes.push(contact);
+      try {
+        await this.sendMessageToArrivalConfirmation(contact.phone, invitationCaption);
+        successes.push(contact);
+      } catch (err) {
+        failures.push({
+          name: contact.name,
+          phone: contact.phone,
+          error: err.message,
+        });
+      }
       await this.delay(1000); // 20 שנייה בין הודעות
     }
-    return successes
+    return { successes, failures };
   }
 
 
@@ -204,7 +261,7 @@ export class WhatsappService implements OnModuleInit {
       .map(item => {
         return {
           name: item["שם מלא"]?.trim(),
-          phone: `+972${item["מספר טלפון"].toString().replace(/[^0-9]/g, '')}`,// הסרת תווים מיותרים
+          phone: this.normalizeIsraeliPhone(item["מספר טלפון"].toString()),
           tableNumber: item["מספר שולחן"].toString(),
         };
       });
@@ -239,7 +296,7 @@ export class WhatsappService implements OnModuleInit {
     const formattedData = data.filter(item => item["מספר טלפון"]).map(item => {
       return {
         name: item["שם מלא"]?.trim(),
-        phone: `+972${item["מספר טלפון"].toString().replace(/[^0-9]/g, '')}` // הסרת תווים מיותרים
+        phone: this.normalizeIsraeliPhone(item["מספר טלפון"].toString()),
       }
     }
     )
@@ -253,10 +310,10 @@ export class WhatsappService implements OnModuleInit {
   }
   async thenkYouMessage(phoneNumber: string, message: string) {
     try {
-      const number = phoneNumber.replace(/[^0-9]/g, '');
-      const chatId = `${number}@c.us`;
-      await this.client.sendMessage(chatId, message);
-      console.log(`✅ Message with image sent to ${phoneNumber}`);
+      const number = this.normalizeIsraeliPhone(phoneNumber);
+      const chatId = await this.resolveChatId(phoneNumber);
+      await this.client.sendMessage(chatId, message, this.whatsappSendOptions);
+      console.log(`✅ Message with image sent to ${number}`);
     } catch (err) {
       console.error(`❌ Failed to send to ${phoneNumber}:`, err.message);
       throw err;
@@ -324,7 +381,7 @@ export class WhatsappService implements OnModuleInit {
       // })
       .map(g => ({
         name: g.name?.trim(),
-        phone: `${g.phone.toString().replace(/[^0-9]/g, '')}`,
+        phone: this.normalizeIsraeliPhone(g.phone.toString()),
         eventDate: g.event_date
       }));
   }
@@ -346,7 +403,10 @@ export class WhatsappService implements OnModuleInit {
 
     לניווט לאירוע ניתן לרשום בוויז - "${WAZE_SEARCH_HE}"
 
-    לפרטים נוספים, הוספה ליומן ועדכון סטטוס ההגעה ניתן ללחוץ על הקישור הבא:`;
+    לפרטים נוספים, הוספה ליומן ועדכון סטטוס ההגעה ניתן ללחוץ על הקישור הבא:
+מחכים לראותכם!
+${RSVP_LINK}
+${LINK_FOLLOWUP_HE}`;
           await this.sendMessageToArrivalConfirmation(guest.phone, message);
           successes.push(guest.phone);
           await this.delay(1000); // שנייה בין הודעות

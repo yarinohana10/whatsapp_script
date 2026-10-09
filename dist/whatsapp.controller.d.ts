@@ -8,7 +8,17 @@ export declare class WhatsappController {
     }): Promise<{
         status: string;
     }>;
-    uploadExcel(file: Express.Multer.File): Promise<string[]>;
+    uploadExcel(file: Express.Multer.File): Promise<{
+        successes: {
+            name: string;
+            phone: string;
+        }[];
+        failures: {
+            name: string;
+            phone: string;
+            error: string;
+        }[];
+    }>;
     sendTableNumber(file: Express.Multer.File): Promise<string[]>;
     thenkYou(file: Express.Multer.File): Promise<void>;
     onlyOneThenkYouMessage(body: {

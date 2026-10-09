@@ -4,6 +4,11 @@ export declare class WhatsappService implements OnModuleInit {
     private resolveChromeExecutablePath;
     onModuleInit(): Promise<void>;
     private readInvitationMedia;
+    private normalizeIsraeliPhone;
+    private toChatId;
+    private resolveChatId;
+    private readonly whatsappSendOptions;
+    private sendInvitationWithImageCaption;
     sendMessageWithPichture(phoneNumber: string, message: string): Promise<void>;
     sendMessageWithOutPichture(phoneNumber: string, message: string): Promise<void>;
     sendMessageToArrivalConfirmation(phoneNumber: string, message: string): Promise<void>;
@@ -15,7 +20,17 @@ export declare class WhatsappService implements OnModuleInit {
         }[];
     }>;
     private delay;
-    sendMessagesInviteWeddingFromExcel(file: Express.Multer.File): Promise<string[]>;
+    sendMessagesInviteWeddingFromExcel(file: Express.Multer.File): Promise<{
+        successes: {
+            name: string;
+            phone: string;
+        }[];
+        failures: {
+            name: string;
+            phone: string;
+            error: string;
+        }[];
+    }>;
     sendMessagesForTableNumberFromExcel(file: Express.Multer.File): Promise<string[]>;
     sendThenkYouMessageFromExcel(file: Express.Multer.File): Promise<void>;
     thenkYouMessage(phoneNumber: string, message: string): Promise<void>;
