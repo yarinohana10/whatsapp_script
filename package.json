@@ -1,7 +1,7 @@
 {
   "name": "whats-app-clean",
   "version": "1.0.0",
-  "description": "WhatsApp Henna RSVP messaging service",
+  "description": "WhatsApp wedding RSVP messaging service",
   "private": true,
   "scripts": {
     "build": "nest build",

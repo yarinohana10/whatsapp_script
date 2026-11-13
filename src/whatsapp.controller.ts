@@ -1,5 +1,12 @@
 // whatsapp.controller.ts
-import { Controller, Post, Body, UseInterceptors, UploadedFile } from '@nestjs/common';
+import {
+  BadRequestException,
+  Controller,
+  Post,
+  Body,
+  UseInterceptors,
+  UploadedFile,
+} from '@nestjs/common';
 import { WhatsappService } from './whatsapp.service';
 import { FileInterceptor } from '@nestjs/platform-express';
 
@@ -16,6 +23,11 @@ export class WhatsappController {
   @Post('uploadExcel')
   @UseInterceptors(FileInterceptor('file'))
   async uploadExcel(@UploadedFile() file: Express.Multer.File) {
+    if (!file?.buffer?.length) {
+      throw new BadRequestException(
+        'Missing Excel file. In Postman: Body → form-data → key "file" → type File → select your .xlsx.',
+      );
+    }
     return this.whatsappService.sendMessagesInviteWeddingFromExcel(file);
   }
   @Post('sendTbaleNumber')

@@ -8,14 +8,11 @@ import * as XLSX from 'xlsx';
 import dayjs from 'dayjs';
 import { createClient } from '@supabase/supabase-js';
 import {
-  EVENT_DATE_HE,
-  EVENT_NAMES_HE,
-  EVENT_VENUE_HE,
   INVITATION_IMAGE_PATH,
-  LINK_FOLLOWUP_HE,
-  RSVP_LINK,
-  WAZE_SEARCH_HE,
   buildInvitationCaption,
+  buildReminderMessage,
+  buildTableNumberMessage,
+  buildThankYouMessage,
 } from './event.constants';
 
 
@@ -93,6 +90,40 @@ export class WhatsappService implements OnModuleInit {
     return `${this.normalizeIsraeliPhone(phoneNumber)}@c.us`;
   }
 
+  private parseExcelPhoneCell(raw: unknown): string | undefined {
+    if (raw === undefined || raw === null) return undefined;
+    const value = raw.toString().trim();
+    if (!value || value === 'פיזית') return undefined;
+    const digits = value.replace(/[^0-9]/g, '');
+    if (digits.length < 9) return undefined;
+    return value;
+  }
+
+  /** Excel column "מספר טלפון" or "טלפון" (either or both; trimmed headers OK). */
+  private getExcelPhone(row: Record<string, unknown>): string | undefined {
+    const direct = [
+      row['מספר טלפון'],
+      row['טלפון'],
+    ] as const;
+    for (const raw of direct) {
+      const phone = this.parseExcelPhoneCell(raw);
+      if (phone) return phone;
+    }
+    for (const [key, val] of Object.entries(row)) {
+      const header = key.trim();
+      if (header === 'מספר טלפון' || header === 'טלפון') {
+        const phone = this.parseExcelPhoneCell(val);
+        if (phone) return phone;
+      }
+    }
+    return undefined;
+  }
+
+  private getExcelName(row: Record<string, unknown>): string | undefined {
+    const name = row['שם מלא'];
+    return name?.toString()?.trim() || undefined;
+  }
+
   private async resolveChatId(phoneNumber: string): Promise<string> {
     const digits = this.normalizeIsraeliPhone(phoneNumber);
     const wid = await this.client.getNumberId(digits);
@@ -155,8 +186,7 @@ export class WhatsappService implements OnModuleInit {
     try {
       const number = this.normalizeIsraeliPhone(phoneNumber);
       const chatId = await this.resolveChatId(phoneNumber);
-      const caption = `${message} מחכים לראותכם! `;
-      await this.client.sendMessage(chatId, caption, this.whatsappSendOptions);
+      await this.client.sendMessage(chatId, message, this.whatsappSendOptions);
       console.log(`✅ Message with image sent to ${number}`);
     } catch (err) {
       console.error(`❌ Failed to send to ${phoneNumber}:`, err.message);
@@ -200,39 +230,29 @@ export class WhatsappService implements OnModuleInit {
 
   //read from excel
   async sendMessagesInviteWeddingFromExcel(file: Express.Multer.File) {
-    const successes: { name: string; phone: string }[] = [];
-    const failures: { name: string; phone: string; error: string }[] = [];
+    const successes: { name?: string; phone: string }[] = [];
+    const failures: { name?: string; phone: string; error: string }[] = [];
     const workbook = XLSX.read(file.buffer, { type: 'buffer' });
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const data: any = XLSX.utils.sheet_to_json(sheet);
     const formattedData = data
-      .filter(item => item["מספר טלפון"]) // רק שורות עם טלפון
-      .map(item => {
+      .map((item) => {
+        const phone = this.getExcelPhone(item);
+        if (!phone) return null;
         return {
-          name: item["שם מלא"]?.trim(),
-          phone: this.normalizeIsraeliPhone(item["מספר טלפון"].toString()),
+          name: this.getExcelName(item),
+          phone: this.normalizeIsraeliPhone(phone),
         };
-      });
-    // console.log('formattedData', formattedData)
+      })
+      .filter(Boolean) as { name?: string; phone: string }[];
+
+    if (formattedData.length === 0 && data.length > 0) {
+      console.warn(
+        '⚠️ No rows with a valid phone. Use column "טלפון" or "מספר טלפון" (not "פיזית").',
+      );
+    }
+
     for (const contact of formattedData) {
-      // const message = "אנו נרגשים להזמינכם לחגוג עימנו את חתונתינו שתתקיים בתאריך 27/05/25\nנשמח לראותכם!\nירין ואוראן  💍✨";
-      // const message = 'אנו נרגשים להזמינכם לחגוג עימנו את חתונת בננו שתתקיים ב"ה בתאריך 27/05/25\nנשמח לראותכם!\n עמי ואורלי אוחנה 💍✨';
-
-      //       const message1 = `שלום ${contact.name} 😊,
-      // הוזמנתם לחתונה של ירין ואוראן 💍✨
-      // 🗓️ בתאריך 27.05.2025
-      // באולמי דוריה
-      // לאישור הגעה לחתונה, בחירת כמות המגיעים ופרטים נוספים 📋
-      // ניתן ללחוץ על הקישור הבא: 
-      // `;
-      //       const message2 = `היי  😊 ,
-      //       כאן צוות האישורי הגעה לחתונה של ירין ואוראן 🎉
-
-
-      //  שמנו לב שעדיין לא אישרתם את הגעתכם –  נשמח לדעת אם תגיעו וכמה תהיו 🙏
-      // לחצו כאן כדי לעדכן אותנו:
-      //       `;
-
       const invitationCaption = buildInvitationCaption(contact.name);
 
       try {
@@ -247,7 +267,12 @@ export class WhatsappService implements OnModuleInit {
       }
       await this.delay(1000); // 20 שנייה בין הודעות
     }
-    return { successes, failures };
+    return {
+      successes,
+      failures,
+      totalRowsInSheet: data.length,
+      rowsWithValidPhone: formattedData.length,
+    };
   }
 
 
@@ -257,29 +282,27 @@ export class WhatsappService implements OnModuleInit {
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const data: any = XLSX.utils.sheet_to_json(sheet);
     const formattedData = data
-      .filter(item => item["מספר טלפון"]) // רק שורות עם טלפון
-      .map(item => {
+      .map((item) => {
+        const phone = this.getExcelPhone(item);
+        if (!phone) return null;
         return {
-          name: item["שם מלא"]?.trim(),
-          phone: this.normalizeIsraeliPhone(item["מספר טלפון"].toString()),
-          tableNumber: item["מספר שולחן"].toString(),
+          name: this.getExcelName(item),
+          phone: this.normalizeIsraeliPhone(phone),
+          tableNumber: item['מספר שולחן']?.toString(),
         };
-      });
+      })
+      .filter(Boolean) as {
+      name?: string;
+      phone: string;
+      tableNumber: string;
+    }[];
     for (const contact of formattedData) {
 
-      const message = `*🎉 היום הגדול הגיע! 🎉*
-
-*🤍 בדרך לחינה של ${EVENT_NAMES_HE}?🤍*
-
-מספר השולחן שלכם הוא: *${contact.tableNumber}* 🍽️
-
-לניווט לאולם MEDEA רשמו בוויז: *${WAZE_SEARCH_HE}*
-
-`;
+      const message = buildTableNumberMessage(contact.tableNumber);
 
 
       await this.sendMessageWithOutPichture(contact.phone, message);
-      successes.push(contact);
+      successes.push(contact.phone);
       await this.delay(1000); // 20 שנייה בין הודעות
     }
     return successes
@@ -293,17 +316,20 @@ export class WhatsappService implements OnModuleInit {
     const workbook = XLSX.read(file.buffer, { type: 'buffer' });
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const data: any = XLSX.utils.sheet_to_json(sheet);
-    const formattedData = data.filter(item => item["מספר טלפון"]).map(item => {
-      return {
-        name: item["שם מלא"]?.trim(),
-        phone: this.normalizeIsraeliPhone(item["מספר טלפון"].toString()),
-      }
-    }
-    )
+    const formattedData = data
+      .map((item) => {
+        const phone = this.getExcelPhone(item);
+        if (!phone) return null;
+        return {
+          name: this.getExcelName(item),
+          phone: this.normalizeIsraeliPhone(phone),
+        };
+      })
+      .filter(Boolean) as { name?: string; phone: string }[];
     console.log('formattedData', formattedData)
 
     for (const person of formattedData) {
-      const message = ` מודים לכם מקרב לב על השתתפותכם בחינת השנה! מקווים שנהניתם ושניפגש רק בשמחות! אוהבים המון אלי וליאן ${person.name}`
+      const message = buildThankYouMessage(person.name);
       await this.thenkYouMessage(person.phone, message)
       await this.delay(1000)// 1 שנייה בין הודעות
     }
@@ -329,7 +355,7 @@ export class WhatsappService implements OnModuleInit {
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const data: any[] = XLSX.utils.sheet_to_json(sheet);
     for (const row of data) {
-      const phoneNumber = row["מספר טלפון"]?.toString().trim();
+      const phoneNumber = this.getExcelPhone(row);
       if (!phoneNumber) continue;
 
       if (seen.has(phoneNumber)) {
@@ -398,15 +424,7 @@ export class WhatsappService implements OnModuleInit {
         for (const guest of guests) {
           // const dateFormatted = dayjs(guest.eventDate).format('DD.MM.YYYY');
 
-          const message = `שלום ${guest.name || ''}, אנו מזכירים לכם לגבי *החינה של ${EVENT_NAMES_HE}* שתתקיים בתאריך ${EVENT_DATE_HE}
-    ב${EVENT_VENUE_HE}
-
-    לניווט לאירוע ניתן לרשום בוויז - "${WAZE_SEARCH_HE}"
-
-    לפרטים נוספים, הוספה ליומן ועדכון סטטוס ההגעה ניתן ללחוץ על הקישור הבא:
-מחכים לראותכם!
-${RSVP_LINK}
-${LINK_FOLLOWUP_HE}`;
+          const message = buildReminderMessage(guest.name);
           await this.sendMessageToArrivalConfirmation(guest.phone, message);
           successes.push(guest.phone);
           await this.delay(1000); // שנייה בין הודעות
