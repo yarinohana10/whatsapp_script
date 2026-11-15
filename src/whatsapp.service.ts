@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { BadRequestException, Injectable, OnModuleInit } from '@nestjs/common';
 import { Client, LocalAuth } from 'whatsapp-web.js';
 import * as qrcode from 'qrcode-terminal';
 import { MessageMedia } from 'whatsapp-web.js';
@@ -13,6 +13,8 @@ import {
   buildReminderMessage,
   buildTableNumberMessage,
   buildThankYouMessage,
+  buildCoupleInvitationMessage,
+  buildSingleInvitationMessage,
 } from './event.constants';
 
 
@@ -120,8 +122,15 @@ export class WhatsappService implements OnModuleInit {
   }
 
   private getExcelName(row: Record<string, unknown>): string | undefined {
-    const name = row['שם מלא'];
-    return name?.toString()?.trim() || undefined;
+    const direct = row['שם מלא']?.toString()?.trim();
+    if (direct) return direct;
+    for (const [key, val] of Object.entries(row)) {
+      if (key.trim() === 'שם מלא') {
+        const name = val?.toString()?.trim();
+        if (name) return name;
+      }
+    }
+    return undefined;
   }
 
   private async resolveChatId(phoneNumber: string): Promise<string> {
@@ -346,6 +355,79 @@ export class WhatsappService implements OnModuleInit {
     }
   }
 
+
+  /** Parse "שם מלא" + "מספר טלפון" rows out of an uploaded Excel file. */
+  private parseContactsFromExcel(file: Express.Multer.File): {
+    contacts: { name?: string; phone: string }[];
+    totalRowsInSheet: number;
+  } {
+    const workbook = XLSX.read(file.buffer, { type: 'buffer' });
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const data: any[] = XLSX.utils.sheet_to_json(sheet);
+
+    const contacts = data
+      .map((item) => {
+        const phone = this.getExcelPhone(item);
+        if (!phone) return null;
+        return {
+          name: this.getExcelName(item),
+          phone: this.normalizeIsraeliPhone(phone),
+        };
+      })
+      .filter(Boolean) as { name?: string; phone: string }[];
+
+    return { contacts, totalRowsInSheet: data.length };
+  }
+
+  /** Send the invitation (image + caption) to every row of the Excel file. */
+  private async sendInvitationsFromExcel(
+    file: Express.Multer.File,
+    buildMessage: (name?: string) => string,
+  ) {
+    if (!file?.buffer?.length) {
+      throw new BadRequestException(
+        'Missing Excel file. In Postman: Body -> form-data -> key "file" -> type File -> select your .xlsx.',
+      );
+    }
+
+    const { contacts, totalRowsInSheet } = this.parseContactsFromExcel(file);
+    const successes: { name?: string; phone: string }[] = [];
+    const failures: { name?: string; phone: string; error: string }[] = [];
+
+    for (const contact of contacts) {
+      try {
+        await this.sendMessageToArrivalConfirmation(
+          contact.phone,
+          buildMessage(contact.name),
+        );
+        successes.push(contact);
+      } catch (err) {
+        failures.push({
+          name: contact.name,
+          phone: contact.phone,
+          error: err.message,
+        });
+      }
+      await this.delay(1000);
+    }
+
+    return {
+      successes,
+      failures,
+      totalRowsInSheet,
+      rowsWithValidPhone: contacts.length,
+    };
+  }
+
+  /** Invitation wording for couples. */
+  async sendInvitationToCouplesFromExcel(file: Express.Multer.File) {
+    return this.sendInvitationsFromExcel(file, buildCoupleInvitationMessage);
+  }
+
+  /** Invitation wording for single guests. */
+  async sendInvitationToSinglesFromExcel(file: Express.Multer.File) {
+    return this.sendInvitationsFromExcel(file, buildSingleInvitationMessage);
+  }
 
   async checkUnikeyNumber(file: Express.Multer.File) {
     const invalidNumbers: string[] = [];

@@ -30,6 +30,20 @@ export class WhatsappController {
     }
     return this.whatsappService.sendMessagesInviteWeddingFromExcel(file);
   }
+  /** Wedding invitation for couples (Excel: "שם מלא" + "מספר טלפון"). */
+  @Post('sendInvitationCouples')
+  @UseInterceptors(FileInterceptor('file'))
+  async sendInvitationCouples(@UploadedFile() file: Express.Multer.File) {
+    return this.whatsappService.sendInvitationToCouplesFromExcel(file);
+  }
+
+  /** Wedding invitation for single guests (Excel: "שם מלא" + "מספר טלפון"). */
+  @Post('sendInvitationSingles')
+  @UseInterceptors(FileInterceptor('file'))
+  async sendInvitationSingles(@UploadedFile() file: Express.Multer.File) {
+    return this.whatsappService.sendInvitationToSinglesFromExcel(file);
+  }
+
   @Post('sendTbaleNumber')
   @UseInterceptors(FileInterceptor('file'))
   async sendTableNumber(@UploadedFile() file: Express.Multer.File) {

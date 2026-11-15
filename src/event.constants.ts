@@ -78,3 +78,25 @@ export function buildThankYouMessage(guestName?: string): string {
 אוהבים ומעריכים,
 ${EVENT_NAMES_HE} 💕`;
 }
+
+/** Wedding invitation caption for couples (sent with the invitation image). */
+export function buildCoupleInvitationMessage(guestName?: string): string {
+  const nameLine = guestName?.trim() ? `${guestName.trim()}\n` : '';
+
+  return `${nameLine}שמחים ונרגשים להזמינכם ליום המאושר בחיינו! 💍
+בעז"ה ${EVENT_DAY_HE} | 01.12.2026
+אולמי דוריה | שדה יואב
+מחכים לראותכם,
+ליאן ואלי 🤍`;
+}
+
+/** Wedding invitation caption for single guests (sent with the invitation image). */
+export function buildSingleInvitationMessage(guestName?: string): string {
+  const nameLine = guestName?.trim() ? `${guestName.trim()}\n` : '';
+
+  return `${nameLine}שמחים ונרגשים להזמינכם ליום המאושר בחיינו! 🤍
+בעז"ה ${EVENT_DAY_HE} | 01.12.2026
+אולמי דוריה | שדה יואב
+מחכים לראותכם,
+ליאן ואלי 🤍`;
+}
