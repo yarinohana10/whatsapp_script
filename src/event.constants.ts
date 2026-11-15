@@ -94,7 +94,7 @@ export function buildCoupleInvitationMessage(guestName?: string): string {
 export function buildSingleInvitationMessage(guestName?: string): string {
   const nameLine = guestName?.trim() ? `${guestName.trim()}\n` : '';
 
-  return `${nameLine}שמחים ונרגשים להזמינכם ליום המאושר בחיינו! 🤍
+  return `${nameLine}שמחים ונרגשים להזמינך ליום המאושר בחיינו! 🤍
 בעז"ה ${EVENT_DAY_HE} | 01.12.2026
 אולמי דוריה | שדה יואב
 מחכים לראותכם,
