@@ -97,6 +97,6 @@ export function buildSingleInvitationMessage(guestName?: string): string {
   return `${nameLine}שמחים ונרגשים להזמינך ליום המאושר בחיינו! 🤍
 בעז"ה ${EVENT_DAY_HE} | 01.12.2026
 אולמי דוריה | שדה יואב
-מחכים לראותכם,
+מחכים לראותך,
 ליאן ואלי 🤍`;
 }
