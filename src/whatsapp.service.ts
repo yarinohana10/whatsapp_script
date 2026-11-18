@@ -1,4 +1,9 @@
-import { BadRequestException, Injectable, OnModuleInit } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  OnModuleInit,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { Client, LocalAuth } from 'whatsapp-web.js';
 import * as qrcode from 'qrcode-terminal';
 import { MessageMedia } from 'whatsapp-web.js';
@@ -9,6 +14,7 @@ import dayjs from 'dayjs';
 import { createClient } from '@supabase/supabase-js';
 import {
   INVITATION_IMAGE_PATH,
+  SEND_DELAY_MS,
   buildInvitationCaption,
   buildReminderMessage,
   buildTableNumberMessage,
@@ -21,6 +27,9 @@ import {
 @Injectable()
 export class WhatsappService implements OnModuleInit {
   private client: Client;
+
+  /** True only between the client’s "ready" and "disconnected" events. */
+  private isReady = false;
 
   private resolveChromeExecutablePath(): string | undefined {
     const candidates = [
@@ -50,6 +59,7 @@ export class WhatsappService implements OnModuleInit {
       });
 
       this.client.on('ready', () => {
+        this.isReady = true;
         console.log('✅ WhatsApp is ready!');
       });
 
@@ -58,16 +68,38 @@ export class WhatsappService implements OnModuleInit {
       });
 
       this.client.on('auth_failure', (msg) => {
+        this.isReady = false;
         console.error('❌ Authentication failed:', msg);
       });
 
       this.client.on('disconnected', (reason) => {
+        this.isReady = false;
         console.warn('⚠️ Disconnected:', reason);
       });
 
       await this.client.initialize();
     } catch (err) {
       console.error('🚨 Error initializing WhatsApp client:', err);
+    }
+  }
+
+  /**
+   * Refuse to start a bulk run unless WhatsApp is actually connected, so a dead
+   * session fails on request 1 instead of burning every row in the file.
+   */
+  private async ensureWhatsappReady(): Promise<void> {
+    let state: string | undefined;
+    try {
+      state = await this.client?.getState();
+    } catch {
+      state = undefined;
+    }
+
+    if (!this.isReady || state !== 'CONNECTED') {
+      this.isReady = state === 'CONNECTED';
+      throw new ServiceUnavailableException(
+        `WhatsApp is not connected (state: ${state ?? 'unknown'}). Restart the server and scan the QR, then try again.`,
+      );
     }
   }
 
@@ -224,7 +256,7 @@ export class WhatsappService implements OnModuleInit {
       try {
         await this.sendMessageWithOutPichture(num, message);
         successes.push(num);
-        await this.delay(1000); // 1 שנייה בין הודעות
+        await this.delay(SEND_DELAY_MS);
       } catch (err) {
         failures.push({ number: num, error: err.message });
       }
@@ -239,6 +271,8 @@ export class WhatsappService implements OnModuleInit {
 
   //read from excel
   async sendMessagesInviteWeddingFromExcel(file: Express.Multer.File) {
+    await this.ensureWhatsappReady();
+
     const successes: { name?: string; phone: string }[] = [];
     const failures: { name?: string; phone: string; error: string }[] = [];
     const workbook = XLSX.read(file.buffer, { type: 'buffer' });
@@ -261,7 +295,17 @@ export class WhatsappService implements OnModuleInit {
       );
     }
 
-    for (const contact of formattedData) {
+    const notSent: { name?: string; phone: string }[] = [];
+
+    for (const [index, contact] of formattedData.entries()) {
+      if (!this.isReady) {
+        notSent.push(...formattedData.slice(index));
+        console.warn(
+          `⚠️ WhatsApp disconnected - stopping after ${successes.length} sent, ${notSent.length} not attempted.`,
+        );
+        break;
+      }
+
       const invitationCaption = buildInvitationCaption(contact.name);
 
       try {
@@ -274,11 +318,13 @@ export class WhatsappService implements OnModuleInit {
           error: err.message,
         });
       }
-      await this.delay(1000); // 20 שנייה בין הודעות
+      await this.delay(SEND_DELAY_MS);
     }
     return {
       successes,
       failures,
+      notSent,
+      stoppedEarly: notSent.length > 0,
       totalRowsInSheet: data.length,
       rowsWithValidPhone: formattedData.length,
     };
@@ -312,7 +358,7 @@ export class WhatsappService implements OnModuleInit {
 
       await this.sendMessageWithOutPichture(contact.phone, message);
       successes.push(contact.phone);
-      await this.delay(1000); // 20 שנייה בין הודעות
+      await this.delay(SEND_DELAY_MS);
     }
     return successes
   }
@@ -340,7 +386,7 @@ export class WhatsappService implements OnModuleInit {
     for (const person of formattedData) {
       const message = buildThankYouMessage(person.name);
       await this.thenkYouMessage(person.phone, message)
-      await this.delay(1000)// 1 שנייה בין הודעות
+      await this.delay(SEND_DELAY_MS)
     }
   }
   async thenkYouMessage(phoneNumber: string, message: string) {
@@ -390,11 +436,22 @@ export class WhatsappService implements OnModuleInit {
       );
     }
 
+    await this.ensureWhatsappReady();
+
     const { contacts, totalRowsInSheet } = this.parseContactsFromExcel(file);
     const successes: { name?: string; phone: string }[] = [];
     const failures: { name?: string; phone: string; error: string }[] = [];
+    const notSent: { name?: string; phone: string }[] = [];
 
-    for (const contact of contacts) {
+    for (const [index, contact] of contacts.entries()) {
+      if (!this.isReady) {
+        notSent.push(...contacts.slice(index));
+        console.warn(
+          `⚠️ WhatsApp disconnected - stopping after ${successes.length} sent, ${notSent.length} not attempted.`,
+        );
+        break;
+      }
+
       try {
         await this.sendMessageToArrivalConfirmation(
           contact.phone,
@@ -408,12 +465,14 @@ export class WhatsappService implements OnModuleInit {
           error: err.message,
         });
       }
-      await this.delay(1000);
+      await this.delay(SEND_DELAY_MS);
     }
 
     return {
       successes,
       failures,
+      notSent,
+      stoppedEarly: notSent.length > 0,
       totalRowsInSheet,
       rowsWithValidPhone: contacts.length,
     };
@@ -509,7 +568,7 @@ export class WhatsappService implements OnModuleInit {
           const message = buildReminderMessage(guest.name);
           await this.sendMessageToArrivalConfirmation(guest.phone, message);
           successes.push(guest.phone);
-          await this.delay(1000); // שנייה בין הודעות
+          await this.delay(SEND_DELAY_MS);
         }
 
         return successes;

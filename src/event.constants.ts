@@ -14,6 +14,9 @@ export const CHUPPAH_TIME_HE = '20:00';
 
 export const INVITATION_IMAGE_PATH = 'src/assets/wedding-invitation.jpeg';
 
+/** Pause between two outgoing messages. Sending faster gets the session flagged as spam and logged out. */
+export const SEND_DELAY_MS = 30_000;
+
 export const LINK_FOLLOWUP_HE =
   'במידה והקישור לא נפתח השיבו כאן בהודעה חוזרת את המילה -פתח- ותוכלו להיכנס לקישור';
 
