@@ -134,16 +134,71 @@ export class WhatsappService implements OnModuleInit {
    * a fresh page, which avoids the "binding already exists" crash that comes
    * from re-injecting into a page that has already been used.
    */
+  /**
+   * Make absolutely sure the old Chrome is gone. destroy() cannot close a
+   * browser whose page has detached, and a surviving process keeps the profile
+   * locked, so the next launch fails with "browser is already running".
+   */
+  private async killBrowser(): Promise<void> {
+    const client = this.client as unknown as {
+      destroy?: () => Promise<void>;
+      pupBrowser?: { close?: () => Promise<void>; process?: () => { pid?: number } | null };
+    };
+
+    const pid = client?.pupBrowser?.process?.()?.pid;
+
+    try {
+      await client?.destroy?.();
+    } catch (err) {
+      console.warn('… destroy() failed:', (err as Error).message);
+    }
+
+    try {
+      await client?.pupBrowser?.close?.();
+    } catch {
+      // the page is detached; closing politely is expected to fail
+    }
+
+    if (pid) {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // already gone
+      }
+
+      // Wait for the process to actually disappear before relaunching.
+      for (let i = 0; i < 40; i++) {
+        try {
+          process.kill(pid, 0);
+        } catch {
+          break; // throwing means the pid no longer exists
+        }
+        await this.delay(500);
+      }
+    }
+
+    // Chrome leaves these behind when it is killed, and puppeteer reads them
+    // as "still running".
+    const sessionDir = path.join(process.cwd(), '.wwebjs_auth', 'session');
+    for (const lock of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
+      try {
+        fs.rmSync(path.join(sessionDir, lock), { force: true });
+      } catch {
+        // nothing to clear
+      }
+    }
+  }
+
+  /**
+   * Throw the dead browser away and start a brand-new one. A fresh Client gets
+   * a fresh page, which avoids the "binding already exists" crash that comes
+   * from re-injecting into a page that has already been used.
+   */
   private async restartClient(): Promise<boolean> {
     console.warn('♻️ WhatsApp page died - restarting the client…');
     this.isReady = false;
 
-    try {
-      await this.client?.destroy();
-    } catch (err) {
-      console.warn('… could not close the old browser:', (err as Error).message);
-    }
-
+    await this.killBrowser();
     await this.delay(3000);
 
     try {
