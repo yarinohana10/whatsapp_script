@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   OnModuleInit,
   ServiceUnavailableException,
@@ -34,8 +35,28 @@ export class WhatsappService implements OnModuleInit {
   /** Resolved the next time the client reports itself ready. */
   private readyWaiters: (() => void)[] = [];
 
-  /** How many times one bulk run may rebuild the browser before giving up. */
-  private static readonly MAX_RESTARTS_PER_RUN = 5;
+  /**
+   * The WhatsApp Web page reliably dies after a handful of media messages, so
+   * the browser is recycled on purpose before that happens instead of waiting
+   * for the crash.
+   */
+  private static readonly RECYCLE_AFTER_SENDS = 4;
+
+  /** Consecutive failed rebuilds before a run gives up for good. */
+  private static readonly MAX_CONSECUTIVE_RESTART_FAILURES = 3;
+
+  /** Progress of the run in flight, readable while it works. */
+  private run: {
+    status: 'running' | 'finished' | 'aborted';
+    startedAt: string;
+    finishedAt?: string;
+    total: number;
+    sent: string[];
+    failed: { phone: string; error: string }[];
+    pending: string[];
+    restarts: number;
+    note?: string;
+  } | null = null;
 
   private resolveChromeExecutablePath(): string | undefined {
     const candidates = [
@@ -403,7 +424,7 @@ export class WhatsappService implements OnModuleInit {
   //read from excel
   /** The RSVP route: same image, same resilience, RSVP wording. */
   async sendMessagesInviteWeddingFromExcel(file: Express.Multer.File) {
-    return this.sendInvitationsFromExcel(file, buildInvitationCaption);
+    return this.startRun(file, buildInvitationCaption);
   }
 
   async sendMessagesForTableNumberFromExcel(file: Express.Multer.File) {
@@ -501,7 +522,12 @@ export class WhatsappService implements OnModuleInit {
   }
 
   /** Send the invitation (image + caption) to every row of the Excel file. */
-  private async sendInvitationsFromExcel(
+  /**
+   * Kick off a run and return at once. The loop keeps going in the background
+   * for as long as it needs, so one Postman request covers the whole file and
+   * no HTTP timeout can cut it short. Poll getRunStatus() for progress.
+   */
+  private startRun(
     file: Express.Multer.File,
     buildMessage: (name?: string) => string,
   ) {
@@ -511,88 +537,163 @@ export class WhatsappService implements OnModuleInit {
       );
     }
 
-    await this.ensureWhatsappReady();
+    if (this.run?.status === 'running') {
+      throw new ConflictException(
+        `A run is already in progress (${this.run.sent.length}/${this.run.total} sent). Check GET /whatsapp/runStatus.`,
+      );
+    }
 
     const { contacts, totalRowsInSheet } = this.parseContactsFromExcel(file);
-    const successes: { name?: string; phone: string }[] = [];
-    const failures: { name?: string; phone: string; error: string }[] = [];
-    const notSent: { name?: string; phone: string }[] = [];
-    let restarts = 0;
+
+    if (contacts.length === 0) {
+      throw new BadRequestException(
+        'No row in the sheet had a usable phone number. Expected a "מספר טלפון" or "טלפון" column.',
+      );
+    }
+
+    this.run = {
+      status: 'running',
+      startedAt: new Date().toISOString(),
+      total: contacts.length,
+      sent: [],
+      failed: [],
+      pending: contacts.map((c) => c.phone),
+      restarts: 0,
+    };
+
+    // Deliberately not awaited: the HTTP response goes out now.
+    void this.processRun(contacts, buildMessage);
+
+    return {
+      status: 'started',
+      total: contacts.length,
+      totalRowsInSheet,
+      estimatedMinutes: Math.ceil((contacts.length * 35) / 60),
+      statusUrl: 'GET http://localhost:3001/whatsapp/runStatus',
+    };
+  }
+
+  /** The actual sending loop. Updates this.run as it goes. */
+  private async processRun(
+    contacts: { name?: string; phone: string }[],
+    buildMessage: (name?: string) => string,
+  ): Promise<void> {
+    const run = this.run!;
+    let sinceRecycle = 0;
+    let consecutiveRestartFailures = 0;
 
     for (const [index, contact] of contacts.entries()) {
+      // Recycle before the page has a chance to die on its own.
+      if (sinceRecycle >= WhatsappService.RECYCLE_AFTER_SENDS) {
+        console.log(
+          `🔄 ${sinceRecycle} messages on this browser - recycling it before it dies…`,
+        );
+        sinceRecycle = 0;
+        run.restarts++;
+        if (await this.restartClient()) {
+          consecutiveRestartFailures = 0;
+        } else {
+          consecutiveRestartFailures++;
+        }
+      }
+
       let delivered = false;
       let lastError = '';
-      let gaveUp = false;
 
-      // Two tries at most: the original send, plus one on a rebuilt client.
-      for (let attempt = 0; attempt < 2 && !delivered; attempt++) {
+      // Each contact gets a few goes: a rebuild between them costs ~30s.
+      for (let attempt = 0; attempt < 3 && !delivered; attempt++) {
+        if (!this.isReady) {
+          run.restarts++;
+          if (await this.restartClient()) {
+            consecutiveRestartFailures = 0;
+          } else {
+            consecutiveRestartFailures++;
+            if (
+              consecutiveRestartFailures >=
+              WhatsappService.MAX_CONSECUTIVE_RESTART_FAILURES
+            ) {
+              break;
+            }
+            await this.delay(5000);
+            continue;
+          }
+        }
+
         try {
           await this.sendMessageToArrivalConfirmation(
             contact.phone,
             buildMessage(contact.name),
           );
           delivered = true;
+          sinceRecycle++;
         } catch (err) {
           lastError = (err as Error).message;
-
           if (!this.isSessionDeadError(err)) break;
 
-          if (restarts >= WhatsappService.MAX_RESTARTS_PER_RUN) {
-            console.error(
-              `❌ Already restarted ${restarts} times in this run - stopping.`,
-            );
-            gaveUp = true;
-            break;
-          }
-
-          restarts++;
-          if (!(await this.restartClient())) {
-            gaveUp = true;
-            break;
+          run.restarts++;
+          sinceRecycle = 0;
+          if (await this.restartClient()) {
+            consecutiveRestartFailures = 0;
+          } else {
+            consecutiveRestartFailures++;
           }
         }
       }
+
+      run.pending = run.pending.filter((p) => p !== contact.phone);
 
       if (delivered) {
-        successes.push(contact);
+        run.sent.push(contact.phone);
       } else {
-        failures.push({
-          name: contact.name,
-          phone: contact.phone,
-          error: lastError,
-        });
-
-        if (gaveUp) {
-          notSent.push(...contacts.slice(index + 1));
-          console.warn(
-            `⚠️ Stopping: ${successes.length} sent, ${notSent.length} not attempted.`,
-          );
-          break;
-        }
+        run.failed.push({ phone: contact.phone, error: lastError });
       }
 
-      await this.delay(randomSendDelayMs());
+      if (
+        consecutiveRestartFailures >=
+        WhatsappService.MAX_CONSECUTIVE_RESTART_FAILURES
+      ) {
+        run.pending = contacts.slice(index + 1).map((c) => c.phone);
+        run.status = 'aborted';
+        run.finishedAt = new Date().toISOString();
+        run.note = `Could not rebuild the browser ${consecutiveRestartFailures} times in a row. Restart the server, then send the remaining numbers again.`;
+        console.error('🛑 ' + run.note);
+        return;
+      }
+
+      if (index < contacts.length - 1) {
+        await this.delay(randomSendDelayMs());
+      }
+    }
+
+    run.status = 'finished';
+    run.finishedAt = new Date().toISOString();
+    console.log(
+      `🏁 Done: ${run.sent.length} sent, ${run.failed.length} failed, ${run.restarts} browser restarts.`,
+    );
+  }
+
+  /** Progress of the current or last run. */
+  getRunStatus() {
+    if (!this.run) {
+      return { status: 'idle', message: 'No run has been started yet.' };
     }
 
     return {
-      successes,
-      failures,
-      notSent,
-      stoppedEarly: notSent.length > 0,
-      restarts,
-      totalRowsInSheet,
-      rowsWithValidPhone: contacts.length,
+      ...this.run,
+      sentCount: this.run.sent.length,
+      failedCount: this.run.failed.length,
+      pendingCount: this.run.pending.length,
     };
   }
 
   /** Invitation wording for couples. */
   async sendInvitationToCouplesFromExcel(file: Express.Multer.File) {
-    return this.sendInvitationsFromExcel(file, buildCoupleInvitationMessage);
+    return this.startRun(file, buildCoupleInvitationMessage);
   }
 
   /** Invitation wording for single guests. */
   async sendInvitationToSinglesFromExcel(file: Express.Multer.File) {
-    return this.sendInvitationsFromExcel(file, buildSingleInvitationMessage);
+    return this.startRun(file, buildSingleInvitationMessage);
   }
 
   async checkUnikeyNumber(file: Express.Multer.File) {

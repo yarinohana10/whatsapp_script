@@ -2,6 +2,7 @@
 import {
   BadRequestException,
   Controller,
+  Get,
   Post,
   Body,
   UseInterceptors,
@@ -13,6 +14,12 @@ import { FileInterceptor } from '@nestjs/platform-express';
 @Controller('whatsapp')
 export class WhatsappController {
   constructor(private readonly whatsappService: WhatsappService) { }
+
+  /** Progress of the run in flight (or the last one). */
+  @Get('runStatus')
+  runStatus() {
+    return this.whatsappService.getRunStatus();
+  }
 
   @Post('send')
   async send(@Body() body: { numbers: string[]; message: string }) {
