@@ -14,7 +14,7 @@ import dayjs from 'dayjs';
 import { createClient } from '@supabase/supabase-js';
 import {
   INVITATION_IMAGE_PATH,
-  SEND_DELAY_MS,
+  randomSendDelayMs,
   buildInvitationCaption,
   buildReminderMessage,
   buildTableNumberMessage,
@@ -256,7 +256,7 @@ export class WhatsappService implements OnModuleInit {
       try {
         await this.sendMessageWithOutPichture(num, message);
         successes.push(num);
-        await this.delay(SEND_DELAY_MS);
+        await this.delay(randomSendDelayMs());
       } catch (err) {
         failures.push({ number: num, error: err.message });
       }
@@ -318,7 +318,7 @@ export class WhatsappService implements OnModuleInit {
           error: err.message,
         });
       }
-      await this.delay(SEND_DELAY_MS);
+      await this.delay(randomSendDelayMs());
     }
     return {
       successes,
@@ -358,7 +358,7 @@ export class WhatsappService implements OnModuleInit {
 
       await this.sendMessageWithOutPichture(contact.phone, message);
       successes.push(contact.phone);
-      await this.delay(SEND_DELAY_MS);
+      await this.delay(randomSendDelayMs());
     }
     return successes
   }
@@ -386,7 +386,7 @@ export class WhatsappService implements OnModuleInit {
     for (const person of formattedData) {
       const message = buildThankYouMessage(person.name);
       await this.thenkYouMessage(person.phone, message)
-      await this.delay(SEND_DELAY_MS)
+      await this.delay(randomSendDelayMs())
     }
   }
   async thenkYouMessage(phoneNumber: string, message: string) {
@@ -465,7 +465,7 @@ export class WhatsappService implements OnModuleInit {
           error: err.message,
         });
       }
-      await this.delay(SEND_DELAY_MS);
+      await this.delay(randomSendDelayMs());
     }
 
     return {
@@ -568,7 +568,7 @@ export class WhatsappService implements OnModuleInit {
           const message = buildReminderMessage(guest.name);
           await this.sendMessageToArrivalConfirmation(guest.phone, message);
           successes.push(guest.phone);
-          await this.delay(SEND_DELAY_MS);
+          await this.delay(randomSendDelayMs());
         }
 
         return successes;

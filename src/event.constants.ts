@@ -14,8 +14,19 @@ export const CHUPPAH_TIME_HE = '20:00';
 
 export const INVITATION_IMAGE_PATH = 'src/assets/wedding-invitation.jpeg';
 
-/** Pause between two outgoing messages. Sending faster gets the session flagged as spam and logged out. */
-export const SEND_DELAY_MS = 30_000;
+/**
+ * Pause between two outgoing messages. Sending faster, or at a perfectly even
+ * pace, gets the session flagged as spam and logged out, so the gap is
+ * randomised inside this range to look less like a script.
+ */
+export const SEND_DELAY_MIN_MS = 25_000;
+export const SEND_DELAY_MAX_MS = 45_000;
+
+/** A random pause in [SEND_DELAY_MIN_MS, SEND_DELAY_MAX_MS]. */
+export function randomSendDelayMs(): number {
+  const span = SEND_DELAY_MAX_MS - SEND_DELAY_MIN_MS;
+  return SEND_DELAY_MIN_MS + Math.floor(Math.random() * (span + 1));
+}
 
 export const LINK_FOLLOWUP_HE =
   'במידה והקישור לא נפתח השיבו כאן בהודעה חוזרת את המילה -פתח- ותוכלו להיכנס לקישור';
