@@ -22,9 +22,9 @@ export function buildInvitationCaption(guestName?: string): string {
   const nameLine = guestName?.trim() ? `${guestName.trim()},\n` : '';
 
   return `${nameLine}הוזמנתם לחתונה של ליאן ואלי 💍✨
-🗓️ תאריך 01.12.2026
+🗓️ בתאריך 01.12.2026
 ${EVENT_VENUE_HE}
-לניווט בוויז: ${WAZE_SEARCH_HE}
+
 לאישור הגעה, פרטים נוספים והוספה ליומן:
 ${RSVP_LINK}
 מחכים לראותכם! ❤️
