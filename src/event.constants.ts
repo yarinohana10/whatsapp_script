@@ -21,18 +21,13 @@ export const LINK_FOLLOWUP_HE =
 export function buildInvitationCaption(guestName?: string): string {
   const nameLine = guestName?.trim() ? `${guestName.trim()},\n` : '';
 
-  return `${nameLine}אנו נרגשים להזמינכם לחגוג עימנו את *חתונתנו* ב${EVENT_DAY_HE}, ${EVENT_DATE_HEBREW_CALENDAR}, ${EVENT_DATE_HE}
-*ב${EVENT_VENUE_HE}*
-
-קבלת פנים: ${RECEPTION_TIME_HE} | חופה וקידושין: ${CHUPPAH_TIME_HE}
-
-לניווט בוויז: *${WAZE_SEARCH_HE}*
-
+  return `${nameLine}הוזמנתם לחתונה של ליאן ואלי 💍✨
+🗓️ תאריך 01.12.2026
+${EVENT_VENUE_HE}
+לניווט בוויז: ${WAZE_SEARCH_HE}
 לאישור הגעה, פרטים נוספים והוספה ליומן:
 ${RSVP_LINK}
-
 מחכים לראותכם! ❤️
-
 ${LINK_FOLLOWUP_HE}`;
 }
 
