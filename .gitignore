@@ -3,3 +3,6 @@ node_modules
 .wwebjs_cache/
 dist/
 .DS_Store
+
+# local sending record - contains guests phone numbers, never push
+SENDING-LOG.md
