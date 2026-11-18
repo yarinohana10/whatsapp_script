@@ -28,8 +28,14 @@ import {
 export class WhatsappService implements OnModuleInit {
   private client: Client;
 
-  /** True only between the client’s "ready" and "disconnected" events. */
+  /** True only between the client's "ready" and "disconnected" events. */
   private isReady = false;
+
+  /** Resolved the next time the client reports itself ready. */
+  private readyWaiters: (() => void)[] = [];
+
+  /** How many times one bulk run may rebuild the browser before giving up. */
+  private static readonly MAX_RESTARTS_PER_RUN = 5;
 
   private resolveChromeExecutablePath(): string | undefined {
     const candidates = [
@@ -41,45 +47,115 @@ export class WhatsappService implements OnModuleInit {
     return candidates.find((p) => fs.existsSync(p));
   }
 
+  /** A fresh client with its event handlers wired up. */
+  private buildClient(): Client {
+    const executablePath = this.resolveChromeExecutablePath();
+    const client = new Client({
+      authStrategy: new LocalAuth(),
+      puppeteer: {
+        headless: false,
+        ...(executablePath ? { executablePath } : {}),
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      },
+    });
+
+    client.on('qr', (qr) => {
+      console.log('📱 Scan this QR code:');
+      qrcode.generate(qr, { small: true });
+    });
+
+    client.on('ready', () => {
+      this.isReady = true;
+      console.log('✅ WhatsApp is ready!');
+      const waiters = this.readyWaiters;
+      this.readyWaiters = [];
+      waiters.forEach((resolve) => resolve());
+    });
+
+    client.on('authenticated', () => {
+      console.log('🔐 Authenticated');
+    });
+
+    client.on('auth_failure', (msg) => {
+      this.isReady = false;
+      console.error('❌ Authentication failed:', msg);
+    });
+
+    client.on('disconnected', (reason) => {
+      this.isReady = false;
+      console.warn('⚠️ Disconnected:', reason);
+    });
+
+    return client;
+  }
+
   async onModuleInit() {
     try {
-      const executablePath = this.resolveChromeExecutablePath();
-      this.client = new Client({
-        authStrategy: new LocalAuth(),
-        puppeteer: {
-          headless: false,
-          ...(executablePath ? { executablePath } : {}),
-          args: ['--no-sandbox', '--disable-setuid-sandbox'],
-        },
-      });
-
-      this.client.on('qr', (qr) => {
-        console.log('📱 Scan this QR code:');
-        qrcode.generate(qr, { small: true });
-      });
-
-      this.client.on('ready', () => {
-        this.isReady = true;
-        console.log('✅ WhatsApp is ready!');
-      });
-
-      this.client.on('authenticated', () => {
-        console.log('🔐 Authenticated');
-      });
-
-      this.client.on('auth_failure', (msg) => {
-        this.isReady = false;
-        console.error('❌ Authentication failed:', msg);
-      });
-
-      this.client.on('disconnected', (reason) => {
-        this.isReady = false;
-        console.warn('⚠️ Disconnected:', reason);
-      });
-
+      this.client = this.buildClient();
       await this.client.initialize();
     } catch (err) {
       console.error('🚨 Error initializing WhatsApp client:', err);
+    }
+  }
+
+  /** Resolves once the client reports ready, or rejects after timeoutMs. */
+  private waitForReady(timeoutMs = 120_000): Promise<void> {
+    if (this.isReady) return Promise.resolve();
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.readyWaiters = this.readyWaiters.filter((w) => w !== waiter);
+        reject(new Error(`WhatsApp did not become ready within ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      const waiter = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+
+      this.readyWaiters.push(waiter);
+    });
+  }
+
+  /**
+   * The page dying takes the whole session with it, and whatsapp-web.js cannot
+   * re-attach to a detached frame. These are the errors that mean "this client
+   * is finished, build a new one".
+   */
+  private isSessionDeadError(err: unknown): boolean {
+    const message = (err as Error)?.message ?? '';
+    return /detached frame|execution context was destroyed|target closed|session closed|protocol error|page crashed|browser has disconnected/i.test(
+      message,
+    );
+  }
+
+  /**
+   * Throw the dead browser away and start a brand-new one. A fresh Client gets
+   * a fresh page, which avoids the "binding already exists" crash that comes
+   * from re-injecting into a page that has already been used.
+   */
+  private async restartClient(): Promise<boolean> {
+    console.warn('♻️ WhatsApp page died - restarting the client…');
+    this.isReady = false;
+
+    try {
+      await this.client?.destroy();
+    } catch (err) {
+      console.warn('… could not close the old browser:', (err as Error).message);
+    }
+
+    await this.delay(3000);
+
+    try {
+      this.client = this.buildClient();
+      await this.client.initialize();
+      await this.waitForReady();
+      console.log('✅ WhatsApp client restarted - resuming where it stopped');
+      return true;
+    } catch (err) {
+      console.error('❌ Restart failed:', (err as Error).message);
+      this.isReady = false;
+      return false;
     }
   }
 
@@ -270,66 +346,10 @@ export class WhatsappService implements OnModuleInit {
   }
 
   //read from excel
+  /** The RSVP route: same image, same resilience, RSVP wording. */
   async sendMessagesInviteWeddingFromExcel(file: Express.Multer.File) {
-    await this.ensureWhatsappReady();
-
-    const successes: { name?: string; phone: string }[] = [];
-    const failures: { name?: string; phone: string; error: string }[] = [];
-    const workbook = XLSX.read(file.buffer, { type: 'buffer' });
-    const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    const data: any = XLSX.utils.sheet_to_json(sheet);
-    const formattedData = data
-      .map((item) => {
-        const phone = this.getExcelPhone(item);
-        if (!phone) return null;
-        return {
-          name: this.getExcelName(item),
-          phone: this.normalizeIsraeliPhone(phone),
-        };
-      })
-      .filter(Boolean) as { name?: string; phone: string }[];
-
-    if (formattedData.length === 0 && data.length > 0) {
-      console.warn(
-        '⚠️ No rows with a valid phone. Use column "טלפון" or "מספר טלפון" (not "פיזית").',
-      );
-    }
-
-    const notSent: { name?: string; phone: string }[] = [];
-
-    for (const [index, contact] of formattedData.entries()) {
-      if (!this.isReady) {
-        notSent.push(...formattedData.slice(index));
-        console.warn(
-          `⚠️ WhatsApp disconnected - stopping after ${successes.length} sent, ${notSent.length} not attempted.`,
-        );
-        break;
-      }
-
-      const invitationCaption = buildInvitationCaption(contact.name);
-
-      try {
-        await this.sendMessageToArrivalConfirmation(contact.phone, invitationCaption);
-        successes.push(contact);
-      } catch (err) {
-        failures.push({
-          name: contact.name,
-          phone: contact.phone,
-          error: err.message,
-        });
-      }
-      await this.delay(randomSendDelayMs());
-    }
-    return {
-      successes,
-      failures,
-      notSent,
-      stoppedEarly: notSent.length > 0,
-      totalRowsInSheet: data.length,
-      rowsWithValidPhone: formattedData.length,
-    };
+    return this.sendInvitationsFromExcel(file, buildInvitationCaption);
   }
-
 
   async sendMessagesForTableNumberFromExcel(file: Express.Multer.File) {
     const successes: string[] = [];
@@ -442,29 +462,60 @@ export class WhatsappService implements OnModuleInit {
     const successes: { name?: string; phone: string }[] = [];
     const failures: { name?: string; phone: string; error: string }[] = [];
     const notSent: { name?: string; phone: string }[] = [];
+    let restarts = 0;
 
     for (const [index, contact] of contacts.entries()) {
-      if (!this.isReady) {
-        notSent.push(...contacts.slice(index));
-        console.warn(
-          `⚠️ WhatsApp disconnected - stopping after ${successes.length} sent, ${notSent.length} not attempted.`,
-        );
-        break;
+      let delivered = false;
+      let lastError = '';
+      let gaveUp = false;
+
+      // Two tries at most: the original send, plus one on a rebuilt client.
+      for (let attempt = 0; attempt < 2 && !delivered; attempt++) {
+        try {
+          await this.sendMessageToArrivalConfirmation(
+            contact.phone,
+            buildMessage(contact.name),
+          );
+          delivered = true;
+        } catch (err) {
+          lastError = (err as Error).message;
+
+          if (!this.isSessionDeadError(err)) break;
+
+          if (restarts >= WhatsappService.MAX_RESTARTS_PER_RUN) {
+            console.error(
+              `❌ Already restarted ${restarts} times in this run - stopping.`,
+            );
+            gaveUp = true;
+            break;
+          }
+
+          restarts++;
+          if (!(await this.restartClient())) {
+            gaveUp = true;
+            break;
+          }
+        }
       }
 
-      try {
-        await this.sendMessageToArrivalConfirmation(
-          contact.phone,
-          buildMessage(contact.name),
-        );
+      if (delivered) {
         successes.push(contact);
-      } catch (err) {
+      } else {
         failures.push({
           name: contact.name,
           phone: contact.phone,
-          error: err.message,
+          error: lastError,
         });
+
+        if (gaveUp) {
+          notSent.push(...contacts.slice(index + 1));
+          console.warn(
+            `⚠️ Stopping: ${successes.length} sent, ${notSent.length} not attempted.`,
+          );
+          break;
+        }
       }
+
       await this.delay(randomSendDelayMs());
     }
 
@@ -473,6 +524,7 @@ export class WhatsappService implements OnModuleInit {
       failures,
       notSent,
       stoppedEarly: notSent.length > 0,
+      restarts,
       totalRowsInSheet,
       rowsWithValidPhone: contacts.length,
     };
